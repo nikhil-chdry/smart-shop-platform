@@ -1,0 +1,11 @@
+# Ignore React junk
+node_modules/
+dist/
+
+# Ignore Python junk
+__pycache__/
+venv/
+.env
+
+# Ignore giant data files
+*.csv
