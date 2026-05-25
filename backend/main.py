@@ -6,7 +6,10 @@ app = FastAPI(title="SmartShop API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "https://smart-shop-platform-aaph.vercel.app"
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
