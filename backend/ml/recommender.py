@@ -1,77 +1,87 @@
-import pandas as pd
-import kagglehub
+import json
 import os
-import re
+import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-def load_and_analyze_data():
-    path = kagglehub.dataset_download("lokeshparab/amazon-products-dataset")
-    csv_file = os.path.join(path, "Amazon-Products.csv")
-    
-    # 1. Load a larger sample to ensure category variety (TVs, Shoes, etc.)
-    df = pd.read_csv(csv_file, nrows=10000)
-    
-    # 2. Drop rows missing critical display data
-    df = df.dropna(subset=['name', 'image', 'actual_price'])
-    
-    # 3. TRUE RANDOM SHUFFLE
-    # Removing random_state makes the shuffle different on every restart
-    df = df.sample(frac=1).reset_index(drop=True)
-    
-    # 4. Take the final 1000 for the app
-    df = df.head(1000)
-    
-    def clean_price(p):
-        val = re.sub(r'[^\d.]', '', str(p))
-        return float(val) if val else 0.0
+print("🤖 Loading recommendation engine...")
 
-    final_df = pd.DataFrame({
-        'id': range(1, len(df) + 1),
-        'name': df['name'],
-        'category': df['main_category'],
-        'price': df['actual_price'].apply(clean_price),
-        'image_url': df['image'],
-        'combined_features': (df['name'] + " " + df['main_category']).str.lower()
-    })
-    return final_df
+# ── Load products ──
+_dir = os.path.dirname(__file__)
+with open(os.path.join(_dir, "products.json"), "r", encoding="utf-8") as f:
+    PRODUCTS = json.load(f)
 
-# --- INITIALIZATION ---
-try:
-    DF_MASTER = load_and_analyze_data()
-    
-    # Define BOTH names to satisfy main.py import and internal logic
-    PRODUCTS = DF_MASTER.to_dict('records')
-    PRODUCTS_LIST = PRODUCTS 
-    
-except Exception as e:
-    print(f"❌ Failed to initialize: {e}")
-    PRODUCTS = []
-    PRODUCTS_LIST = []
-    DF_MASTER = pd.DataFrame()
+PRODUCTS_LIST = PRODUCTS
+_PRODUCTS_BY_ID = {p["id"]: p for p in PRODUCTS}
 
-def get_recommendations(product_id):
-    """
-    Step 2: Advanced Vectorization (Integrated from Notebook)
-    """
-    if not PRODUCTS or DF_MASTER.empty: 
+# ── Build TF-IDF matrix ──
+# Combine name + category into one text string per product
+# More weight on name by repeating it 3x
+def build_product_text(p):
+    name = p.get("name", "")
+    category = p.get("category", "")
+    return f"{name} {name} {name} {category}"
+
+corpus = [build_product_text(p) for p in PRODUCTS]
+
+vectorizer = TfidfVectorizer(
+    stop_words="english",   # remove common words like "and", "the"
+    ngram_range=(1, 2),     # use single words AND word pairs
+    max_features=5000,      # top 5000 most important words
+)
+
+tfidf_matrix = vectorizer.fit_transform(corpus)
+print(f"✅ TF-IDF matrix built: {tfidf_matrix.shape[0]} products × {tfidf_matrix.shape[1]} features")
+
+
+# ── Main recommendation function ──
+def get_recommendations(product_id: int, n: int = 8):
+    target = _PRODUCTS_BY_ID.get(product_id)
+    if not target:
         return []
 
-    vectorizer = TfidfVectorizer(
-        stop_words='english',
-        ngram_range=(1, 2), 
-        max_features=5000
-    )
-    
-    tfidf_matrix = vectorizer.fit_transform(DF_MASTER['combined_features'])
-    cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
-    
+    # Get index of this product in our list
     try:
-        idx = DF_MASTER[DF_MASTER['id'] == product_id].index[0]
-        sim_scores = list(enumerate(cosine_sim[idx]))
-        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1:5]
-        
-        return [PRODUCTS[i[0]] for i in sim_scores]
-    except Exception as e:
-        print(f"Recommendation Error: {e}")
+        idx = next(i for i, p in enumerate(PRODUCTS) if p["id"] == product_id)
+    except StopIteration:
         return []
+
+    # ── Step 1: Cosine similarity on TF-IDF (name similarity) ──
+    product_vector = tfidf_matrix[idx]
+    similarity_scores = cosine_similarity(product_vector, tfidf_matrix).flatten()
+
+    # ── Step 2: Price similarity score (closer price = higher score) ──
+    target_price = target["price"]
+    max_price = max(p["price"] for p in PRODUCTS)
+
+    price_scores = np.array([
+        1 - abs(p["price"] - target_price) / (max_price + 1)
+        for p in PRODUCTS
+    ])
+
+    # ── Step 3: Category boost (same category gets +0.3 bonus) ──
+    category_scores = np.array([
+        0.3 if p["category"] == target["category"] else 0.0
+        for p in PRODUCTS
+    ])
+
+    # ── Step 4: Combine all scores ──
+    # 50% name similarity + 30% price + 20% category
+    final_scores = (
+        0.5 * similarity_scores +
+        0.3 * price_scores +
+        0.2 * category_scores
+    )
+
+    # ── Step 5: Sort and return top N (exclude self) ──
+    ranked_indices = final_scores.argsort()[::-1]  # highest first
+
+    recommendations = []
+    for i in ranked_indices:
+        if PRODUCTS[i]["id"] == product_id:
+            continue  # skip the product itself
+        recommendations.append(PRODUCTS[i])
+        if len(recommendations) >= n:
+            break
+
+    return recommendations
